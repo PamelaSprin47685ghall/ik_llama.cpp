@@ -491,6 +491,8 @@ extern "C" {
         bool graph_reuse;       // whether to reuse graphs when possible [EXPERIMENTAL]
         int  min_experts;
         float thresh_experts;
+        int  min_experts_pp;
+        float thresh_experts_pp;
         bool only_active_experts;
         bool k_cache_hadamard;  // if true, apply Hadamard transfrom to K-cache
         bool v_cache_hadamard;  // if true, apply Hadamard transfrom to V-cache (needs FA)

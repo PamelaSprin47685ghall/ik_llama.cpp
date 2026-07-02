@@ -10,6 +10,20 @@
 #include <unordered_set>
 #include <algorithm>
 
+static bool llm_batch_has_prompt_tokens(const llama_batch & batch) {
+    if (batch.n_tokens <= 1 || batch.logits == nullptr) {
+        return false;
+    }
+
+    for (int32_t i = 0; i < batch.n_tokens; ++i) {
+        if (batch.logits[i] == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 uint32_t llm_build_context::llama_kv_qnext_state_slots(const llama_kv_cache & kv_self) {
     uint32_t n_slots = 0;
 
@@ -80,8 +94,11 @@ llm_build_context::llm_build_context(
         rope_cache       (cparams.rope_cache),
         k_cache_hadamard (cparams.k_cache_hadamard),
         split_mode_graph_scheduling (cparams.split_mode_graph_scheduling),
+        has_prompt_tokens(llm_batch_has_prompt_tokens(batch)),
         min_experts      (cparams.min_experts),
         thresh_experts   (cparams.thresh_experts),
+        min_experts_pp   (cparams.min_experts_pp),
+        thresh_experts_pp(cparams.thresh_experts_pp),
         pooling_type     (cparams.pooling_type),
         rope_type        (hparams.rope_type),
         clear_lctx_inputs(clear_lctx_inputs),
@@ -1043,10 +1060,11 @@ ggml_tensor * llm_build_context::llm_build_moe_ffn(
                        bool   norm_w,
                        bool   scale_w,
                       float   w_scale,
-llm_expert_gating_func_type   gating_op,
-         const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
-         ggml_tensor * up_gate_exps, ggml_tensor * up_gate_exps_b,
-         ggml_tensor * input_logits, ggml_tensor * down_exps_s) {
+ llm_expert_gating_func_type   gating_op,
+          const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
+          ggml_tensor * up_gate_exps, ggml_tensor * up_gate_exps_b,
+          ggml_tensor * input_logits, ggml_tensor * down_exps_s,
+                       bool   has_prompt_tokens) {
 
     GGML_ASSERT(gate_inp || input_logits);
 
@@ -1105,9 +1123,18 @@ llm_expert_gating_func_type   gating_op,
         auto& hparams = lctx.model.hparams;
         selected_experts = ggml_grouped_topk(ctx, selection_probs, hparams.n_expert_groups, hparams.n_group_used, 2, n_expert_used);
     } else {
-        //selected_experts = ggml_top_k_thresh(ctx, selection_probs, n_expert_used,
-        //        lctx.cparams.min_experts, lctx.cparams.thresh_experts); // [n_expert_used, n_tokens]
-        selected_experts = ggml_top_k(ctx, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+        int expert_min = lctx.cparams.min_experts;
+        float expert_thresh = lctx.cparams.thresh_experts;
+        if (has_prompt_tokens && lctx.cparams.min_experts_pp >= 0) {
+            expert_min = lctx.cparams.min_experts_pp;
+            expert_thresh = lctx.cparams.thresh_experts_pp;
+        }
+        if (expert_min >= 0 && expert_min < n_expert_used && expert_thresh > 0.0f) {
+            selected_experts = ggml_top_k_thresh(ctx, selection_probs, n_expert_used,
+                    expert_min, expert_thresh); // [n_expert_used, n_tokens]
+        } else {
+            selected_experts = ggml_top_k(ctx, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+        }
     }
     cb(selected_experts, "ffn_moe_topk", il);
     ggml_tensor * weights = ggml_get_rows(ctx,
@@ -1309,10 +1336,11 @@ ggml_tensor * llm_build_context::llm_build_std_moe_ffn(ggml_context * ctx, llama
                       float   w_scale,
 llm_expert_gating_func_type   gating_op,
             llm_ffn_op_type   type_op_shexp,
-         const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
-         ggml_tensor * up_gate_exps, ggml_tensor * up_gate_exps_b,
-         ggml_tensor * shexp_gate,
-         ggml_tensor * add_extra) {
+          const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
+          ggml_tensor * up_gate_exps, ggml_tensor * up_gate_exps_b,
+          ggml_tensor * shexp_gate,
+          ggml_tensor * add_extra,
+                       bool   has_prompt_tokens) {
 
     auto split_up_exps    = up_exps ? (ggml_split_tensor_t *)up_exps->extra : nullptr;
     auto split_gate_exps  = gate_exps ? (ggml_split_tensor_t *)gate_exps->extra : nullptr;
@@ -1347,7 +1375,7 @@ llm_expert_gating_func_type   gating_op,
                     the_exp_probs_b,
                     n_expert, n_expert_used,
                     type_op, norm_w, scale_w, w_scale,
-                    gating_op, cb, il, graph, false, up_gate_exps, up_gate_exps_b);
+                    gating_op, cb, il, graph, false, up_gate_exps, up_gate_exps_b, nullptr, nullptr, has_prompt_tokens);
         cb(routed_out, "routed_out", il);
         if (add_input) {
             routed_out = ggml_add(ctx, routed_out, input);
@@ -1507,7 +1535,8 @@ llm_expert_gating_func_type   gating_op,
                     type_op, norm_w, scale_w, w_scale,
                     gating_op, cb, il, graph, false,
                     split_up_gate_exps ? split_up_gate_exps->splits[id] : nullptr,
-                    split_exps_up_gate_b ? split_exps_up_gate_b->splits[id] : nullptr);
+                    split_exps_up_gate_b ? split_exps_up_gate_b->splits[id] : nullptr,
+                    nullptr, nullptr, has_prompt_tokens);
         cb(routed_out, "routed_out", il_cb);
 
         if (split_up_shexp) {
