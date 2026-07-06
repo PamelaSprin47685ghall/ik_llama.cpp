@@ -1943,6 +1943,17 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         }
         return true;
     }
+    if (arg == "-ser-pp" || arg == "--prompt-smart-expert-reduction") {
+        CHECK_ARG
+        auto values = string_split_pairs<int,float>(argv[i], ',');
+        if (values.size() == 1) {
+            params.min_experts_pp    = values.front().first;
+            params.thresh_experts_pp = values.front().second;
+        } else {
+            invalid_param = true;
+        }
+        return true;
+    }
     if (arg == "-co" || arg == "--color") {
         params.use_color = true;
         return true;
@@ -3020,6 +3031,7 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",           "-gr, --graph-reuse",            "enable graph reuse (default: %s)", params.graph_reuse ? "enabled" : "disabled" });
     options.push_back({ "*",           "-no-gr, --no-graph-reuse",      "disable graph reuse (default: %s)", !params.graph_reuse ? "enabled" : "disabled" });
     options.push_back({ "*",         "-ser,  --smart-expert-reduction", "experts reduction (default: %d,%g)", params.min_experts, params.thresh_experts});
+    options.push_back({ "*",         "-ser-pp, --prompt-smart-expert-reduction", "prompt processing experts reduction (default: %d,%g; falls back to -ser when unset)", params.min_experts_pp, params.thresh_experts_pp});
     options.push_back({ "*",         "-mqkv,  --merge-qkv,",            "merge Q,K,V (default: %d)", params.merge_qkv});
     options.push_back({ "*",         "-muge,  --merge-up-gate-experts,","merge ffn_up/gate_exps (default: %d)", params.merge_up_gate_exps});
     options.push_back({ "*",         "-khad,  --k-cache-hadamard,",     "Use Hadamard transform for K-cache (default: %d)", params.k_cache_hadamard});
@@ -4263,6 +4275,8 @@ struct llama_context_params common_context_params_to_llama(const gpt_params & pa
     cparams.scheduler_async   = params.scheduler_async;
     cparams.min_experts       = params.min_experts;
     cparams.thresh_experts    = params.thresh_experts;
+    cparams.min_experts_pp    = params.min_experts_pp;
+    cparams.thresh_experts_pp = params.thresh_experts_pp;
     cparams.only_active_experts = params.only_active_exps;
     cparams.max_extra_alloc   = params.max_extra_alloc_MiB;
     cparams.mtp               = params.speculative.has_stage_type(COMMON_SPECULATIVE_TYPE_MTP);
@@ -5304,7 +5318,8 @@ void yaml_dump_non_result_info(FILE * stream, const gpt_params & params, const l
     //fprintf(stream, "split_mode_f16: %s # default: true\n", params.split_mode_f16 ? "true" : "false");
     fprintf(stream, "reduce_type: %s # default f16\n", params.reduce_type.c_str());
     fprintf(stream, "scheduler_async: %s # default: false\n", params.scheduler_async ? "true" : "false");
-    fprintf(stream, "ser: %d,%g # defaulr: -1,0\n", params.min_experts, params.thresh_experts);
+    fprintf(stream, "ser: %d,%g # default: -1,0\n", params.min_experts, params.thresh_experts);
+    fprintf(stream, "ser_pp: %d,%g # default: -1,0\n", params.min_experts_pp, params.thresh_experts_pp);
     fprintf(stream, "temp: %f # default: 0.8\n", sparams.temp);
 
     const std::vector<float> tensor_split_vector(params.tensor_split, params.tensor_split + llama_max_devices());

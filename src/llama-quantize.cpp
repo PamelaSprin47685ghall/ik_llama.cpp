@@ -292,8 +292,8 @@ static ggml_type change_type_if_necessary(ggml_type new_type, int nx, int ny) {
             case GGML_TYPE_Q5_K:   new_type = GGML_TYPE_Q6_0;   break;
             case GGML_TYPE_IQ6_K:
             case GGML_TYPE_Q6_K_R4:
-            case GGML_TYPE_Q8_K_R8:
-            case GGML_TYPE_Q6_K:   new_type = GGML_TYPE_Q8_0;   break;
+            case GGML_TYPE_Q6_K:   new_type = GGML_TYPE_Q6_0;   break;
+            case GGML_TYPE_Q8_K_R8:new_type = GGML_TYPE_Q8_0;   break;
             default: throw std::runtime_error("\nUnsupported tensor size encountered\n");
         }
         LLAMA_LOG_WARN(" - using fallback quantization %s\n", ggml_type_name(new_type));
@@ -728,12 +728,12 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
         else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_R4 && arch != LLM_ARCH_FALCON && i_layer < n_layer/8) {
             new_type = GGML_TYPE_Q5_K;
         }
-        else if ((ftype == LLAMA_FTYPE_MOSTLY_Q4_0 || ftype == LLAMA_FTYPE_MOSTLY_Q5_0)
+        else if ((ftype == LLAMA_FTYPE_MOSTLY_Q4_0 || ftype == LLAMA_FTYPE_MOSTLY_Q4_0_HADAMARD || ftype == LLAMA_FTYPE_MOSTLY_Q5_0)
                 && qs.has_imatrix && i_layer < n_layer/8) {
             // Guard against craziness in the first few ffn_down layers that can happen even with imatrix for Q4_0/Q5_0.
             // We only do it when an imatrix is provided because a) we want to make sure that one can always get the
             // same quantization as before imatrix stuff, and b) Q4_1/Q5_1 do go crazy on ffn_down without an imatrix.
-            new_type = ftype == LLAMA_FTYPE_MOSTLY_Q4_0 ? GGML_TYPE_Q4_1 : GGML_TYPE_Q5_1;
+            new_type = (ftype == LLAMA_FTYPE_MOSTLY_Q4_0 || ftype == LLAMA_FTYPE_MOSTLY_Q4_0_HADAMARD) ? GGML_TYPE_Q4_1 : GGML_TYPE_Q5_1;
         }
         else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_0_R8 && qs.has_imatrix && i_layer < n_layer/8) {
             new_type = GGML_TYPE_IQ4_NL_R4;
@@ -992,12 +992,43 @@ static void do_quantize(int nthread, const ggml_tensor * tensor, ggml_type new_t
     }
 }
 
+// QuaRot: in-place Walsh-Hadamard transform on n floats (n must be power of 2)
+static void quarot_hadamard_block(float * block, int n) {
+    constexpr float ksqrt2 = 0.70710678118654752f;
+    float scale = 1.0f;
+    for (int h = 1; h < n; h <<= 1) {
+        for (int i = 0; i < n; i += 2 * h) {
+            for (int j = i; j < i + h; ++j) {
+                const float a = block[j], b = block[j + h];
+                block[j]       = a + b;
+                block[j + h]   = a - b;
+            }
+        }
+        scale *= ksqrt2;
+    }
+    for (int i = 0; i < n; ++i) block[i] *= scale;
+}
+
+// QuaRot: apply W <- W @ H along ne[0] (input dim), block-diagonal Hadamard
+static void quarot_apply(float * f32_data, const ggml_tensor * tensor, int block_size) {
+    const int ne0   = tensor->ne[0];
+    const int nrows = tensor->ne[1] * tensor->ne[2] * tensor->ne[3];
+    const int nblk  = ne0 / block_size;
+    for (int r = 0; r < nrows; ++r) {
+        float * row = f32_data + (int64_t)r * ne0;
+        for (int b = 0; b < nblk; ++b) {
+            quarot_hadamard_block(row + b * block_size, block_size);
+        }
+    }
+}
+
 static void llama_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, const llama_model_quantize_params * params) {
     ggml_type default_type;
     llama_ftype ftype = params->ftype;
 
     switch (ftype) {
         case LLAMA_FTYPE_MOSTLY_Q4_0: default_type = GGML_TYPE_Q4_0; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_HADAMARD: default_type = GGML_TYPE_Q4_0_HADAMARD; break;
         case LLAMA_FTYPE_MOSTLY_Q4_1: default_type = GGML_TYPE_Q4_1; break;
         case LLAMA_FTYPE_MOSTLY_Q5_0: default_type = GGML_TYPE_Q5_0; break;
         case LLAMA_FTYPE_MOSTLY_Q5_1: default_type = GGML_TYPE_Q5_1; break;
@@ -1684,6 +1715,20 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 } else {
                     llama_tensor_dequantize_internal(tensor, f32_conv_buf, workers, nelements, nthread);
                     f32_data = (float *) f32_conv_buf.data();
+                }
+                if (new_type == GGML_TYPE_Q4_0_HADAMARD) {
+                    constexpr int block_size = 64;
+                    if (tensor->ne[0] % block_size != 0) {
+                        fprintf(stderr, "\nWARNING: skipping Hadamard for %s: ne[0]=%lld not divisible by %d\n",
+                                name.c_str(), (long long)tensor->ne[0], block_size);
+                    } else {
+                        if (tensor->type == GGML_TYPE_F32) {
+                            f32_conv_buf.resize(nelements);
+                            memcpy(f32_conv_buf.data(), f32_data, (size_t)nelements * sizeof(float));
+                            f32_data = (float *) f32_conv_buf.data();
+                        }
+                        quarot_apply(f32_data, tensor, block_size);
+                    }
                 }
 
                 auto expected_size = ggml_row_size(new_type, tensor->ne[0])*tensor->ne[1]*tensor->ne[2]*tensor->ne[3];

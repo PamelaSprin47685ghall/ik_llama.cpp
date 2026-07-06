@@ -52,19 +52,27 @@ ggml_cgraph * llm_build_context::build_qwen35moe() {
                         KQ_mask, nullptr, nullptr, KQ_scale, 0.0f, 0, il, true, false, true, false, true);
             }
 
-            cur = llm_build_std_moe_ffn(ctx0, lctx, model.layers[il].ffn_norm, cur,
-                    model.layers[il].ffn_gate_inp,  nullptr,
-                    model.layers[il].ffn_up_exps,   nullptr,
-                    model.layers[il].ffn_gate_exps, nullptr,
-                    model.layers[il].ffn_down_exps, nullptr,
-                    nullptr,
-                    model.layers[il].ffn_up_shexp,    nullptr, // we don't have shared expert biases?
-                    model.layers[il].ffn_gate_shexp,  nullptr,
-                    model.layers[il].ffn_down_shexp,  nullptr,
-                    n_expert, n_expert_used,
-                    LLM_FFN_SILU, true, false, 0.0f,
-                    LLM_EXPERT_GATING_FUNC_SOFTMAX,
-                    LLM_FFN_SILU, cb, il, gf, true, model.layers[il].ffn_up_gate_exps, nullptr, model.layers[il].ffn_gate_inp_shexp);
+            {
+                int64_t n_expert_used_eff = n_expert_used;
+                if (has_prompt_tokens && min_experts_pp > 0 && min_experts_pp < n_expert_used) {
+                    n_expert_used_eff = min_experts_pp;
+                } else if (min_experts > 0 && min_experts < n_expert_used) {
+                    n_expert_used_eff = min_experts;
+                }
+                cur = llm_build_std_moe_ffn(ctx0, lctx, model.layers[il].ffn_norm, cur,
+                        model.layers[il].ffn_gate_inp,  nullptr,
+                        model.layers[il].ffn_up_exps,   nullptr,
+                        model.layers[il].ffn_gate_exps, nullptr,
+                        model.layers[il].ffn_down_exps, nullptr,
+                        nullptr,
+                        model.layers[il].ffn_up_shexp,    nullptr,
+                        model.layers[il].ffn_gate_shexp,  nullptr,
+                        model.layers[il].ffn_down_shexp,  nullptr,
+                        n_expert, n_expert_used_eff,
+                        LLM_FFN_SILU, true, false, 0.0f,
+                        LLM_EXPERT_GATING_FUNC_SOFTMAX,
+                        LLM_FFN_SILU, cb, il, gf, true, model.layers[il].ffn_up_gate_exps, nullptr, model.layers[il].ffn_gate_inp_shexp, nullptr, has_prompt_tokens);
+            }
 
             cur = lctx.cvec.apply_to(ctx0, cur, il);
             cb(cur, "l_out", il);
@@ -231,7 +239,7 @@ struct ggml_tensor * llm_build_context::build_qwen35moe_mtp(
             n_expert, n_expert_used,
             LLM_FFN_SILU, true, false, 0.0f,
             LLM_EXPERT_GATING_FUNC_SOFTMAX,
-            LLM_FFN_SILU, cb, il, gf, true, mtp_layer.ffn_up_gate_exps, nullptr, mtp_layer.ffn_gate_inp_shexp);
+            LLM_FFN_SILU, cb, il, gf, true, mtp_layer.ffn_up_gate_exps, nullptr, mtp_layer.ffn_gate_inp_shexp, nullptr, has_prompt_tokens);
 
     cur = lctx.cvec.apply_to(ctx0, cur, il);
     cb(cur, "ffn_out", il);

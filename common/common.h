@@ -419,6 +419,8 @@ struct gpt_params {
     bool graph_reuse       = true;  // if to reuse compute graphs
     int  min_experts       = -1;
     float thresh_experts   = 0;
+    int  min_experts_pp    = -1;
+    float thresh_experts_pp = 0;
 
     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
     bool ignore_eos        = false; // ignore generated EOS tokens

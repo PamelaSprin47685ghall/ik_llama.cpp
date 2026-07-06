@@ -46,6 +46,8 @@ struct llama_cparams {
     bool scheduler_async;
     int  min_experts;
     float thresh_experts;
+    int  min_experts_pp;
+    float thresh_experts_pp;
     bool mtp;
     int  worst_graph_tokens;
 

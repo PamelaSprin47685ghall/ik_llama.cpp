@@ -644,7 +644,7 @@ static __device__ void convert_f16(const void * vx, const int64_t ib, const int 
 }
 
 static constexpr __device__ dequantize_kernel_t get_dequantize_kernel(ggml_type type) {
-    return type == GGML_TYPE_Q4_0 ? dequantize_q4_0 :
+    return (type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q4_0_HADAMARD) ? dequantize_q4_0 :
         type == GGML_TYPE_Q4_1 ? dequantize_q4_1 :
         type == GGML_TYPE_Q5_0 ? dequantize_q5_0 :
         type == GGML_TYPE_Q5_1 ? dequantize_q5_1 :
@@ -864,7 +864,7 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
     half * src1_dfloat = nullptr; // dfloat == half
 
     bool src1_convert_f16 =
-        src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q4_1 ||
+        src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q4_0_HADAMARD || src0->type == GGML_TYPE_Q4_1 ||
         src0->type == GGML_TYPE_Q5_0 || src0->type == GGML_TYPE_Q5_1 ||
         src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_F16  ||
         src0->type == GGML_TYPE_IQ2_KT || src0->type == GGML_TYPE_IQ3_KT || src0->type == GGML_TYPE_IQ4_KT;
@@ -881,6 +881,7 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
 
     switch (src0->type) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_0_HADAMARD:
             dequantize_mul_mat_vec_q4_0_cuda(src0_dd_i, src1_dfloat, dst_dd_i, ne00, row_diff, stream);
             break;
         case GGML_TYPE_Q4_1:
@@ -935,7 +936,7 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
 }
 
 bool ggml_cuda_dmmv_type_supported(ggml_type src0_type) {
-    return src0_type == GGML_TYPE_Q4_0 || src0_type == GGML_TYPE_Q4_1 ||
+    return src0_type == GGML_TYPE_Q4_0 || src0_type == GGML_TYPE_Q4_0_HADAMARD || src0_type == GGML_TYPE_Q4_1 ||
         src0_type == GGML_TYPE_Q5_0 || src0_type == GGML_TYPE_Q5_1 ||
         src0_type == GGML_TYPE_Q8_0 || src0_type == GGML_TYPE_Q2_K ||
         src0_type == GGML_TYPE_Q3_K || src0_type == GGML_TYPE_Q4_K ||

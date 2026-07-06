@@ -599,6 +599,7 @@ static __device__ __forceinline__ T dequantize_1_f16(const void * __restrict__ v
 template <int Dk>
 constexpr __device__ vec_dot_KQ_f16_t get_vec_dot_KQ_f16(ggml_type type_K) {
     return type_K == GGML_TYPE_Q4_0   ? vec_dot_fattn_vec_KQ_q4_0<half, Dk>   :
+           type_K == GGML_TYPE_Q4_0_HADAMARD ? vec_dot_fattn_vec_KQ_q4_0<half, Dk>   :
            type_K == GGML_TYPE_Q4_1   ? vec_dot_fattn_vec_KQ_q4_1<half, Dk>   :
            type_K == GGML_TYPE_IQ4_NL ? vec_dot_fattn_vec_KQ_iq4_nl<half, Dk> :
            type_K == GGML_TYPE_Q5_0   ? vec_dot_fattn_vec_KQ_q5_0<half, Dk>   :
@@ -612,6 +613,7 @@ constexpr __device__ vec_dot_KQ_f16_t get_vec_dot_KQ_f16(ggml_type type_K) {
 template <int Dk>
 constexpr __device__ vec_dot_KQ_f32_t get_vec_dot_KQ_f32(ggml_type type_K) {
     return type_K == GGML_TYPE_Q4_0   ? vec_dot_fattn_vec_KQ_q4_0<float, Dk>   :
+           type_K == GGML_TYPE_Q4_0_HADAMARD ? vec_dot_fattn_vec_KQ_q4_0<float, Dk>   :
            type_K == GGML_TYPE_Q4_1   ? vec_dot_fattn_vec_KQ_q4_1<float, Dk>   :
            type_K == GGML_TYPE_IQ4_NL ? vec_dot_fattn_vec_KQ_iq4_nl<float, Dk> :
            type_K == GGML_TYPE_Q5_0   ? vec_dot_fattn_vec_KQ_q5_0<float, Dk>   :
@@ -624,6 +626,7 @@ constexpr __device__ vec_dot_KQ_f32_t get_vec_dot_KQ_f32(ggml_type type_K) {
 
 constexpr __device__ dequantize_1_f16_t get_dequantize_1_f16(ggml_type type_V) {
     return type_V == GGML_TYPE_Q4_0   ? dequantize_1_q4_0<half> :
+           type_V == GGML_TYPE_Q4_0_HADAMARD ? dequantize_1_q4_0<half> :
            type_V == GGML_TYPE_Q4_1   ? dequantize_1_q4_1<half> :
            type_V == GGML_TYPE_Q5_0   ? dequantize_1_q5_0<half> :
            type_V == GGML_TYPE_Q5_1   ? dequantize_1_q5_1<half> :
@@ -636,6 +639,7 @@ constexpr __device__ dequantize_1_f16_t get_dequantize_1_f16(ggml_type type_V) {
 
 constexpr __device__ dequantize_1_f32_t get_dequantize_1_f32(ggml_type type_V) {
     return type_V == GGML_TYPE_Q4_0   ? dequantize_1_q4_0<float> :
+           type_V == GGML_TYPE_Q4_0_HADAMARD ? dequantize_1_q4_0<float> :
            type_V == GGML_TYPE_Q4_1   ? dequantize_1_q4_1<float> :
            type_V == GGML_TYPE_Q5_0   ? dequantize_1_q5_0<float> :
            type_V == GGML_TYPE_Q5_1   ? dequantize_1_q5_1<float> :

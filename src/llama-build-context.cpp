@@ -10,6 +10,20 @@
 #include <unordered_set>
 #include <algorithm>
 
+static bool llm_batch_has_prompt_tokens(const llama_batch & batch) {
+    if (batch.n_tokens <= 1 || batch.logits == nullptr) {
+        return false;
+    }
+
+    for (int32_t i = 0; i < batch.n_tokens; ++i) {
+        if (batch.logits[i] == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 uint32_t llm_build_context::llama_kv_qnext_state_slots(const llama_kv_cache & kv_self) {
     uint32_t n_slots = 0;
 
@@ -80,8 +94,11 @@ llm_build_context::llm_build_context(
         rope_cache       (cparams.rope_cache),
         k_cache_hadamard (cparams.k_cache_hadamard),
         split_mode_graph_scheduling (cparams.split_mode_graph_scheduling),
+        has_prompt_tokens(llm_batch_has_prompt_tokens(batch)),
         min_experts      (cparams.min_experts),
         thresh_experts   (cparams.thresh_experts),
+        min_experts_pp   (cparams.min_experts_pp),
+        thresh_experts_pp(cparams.thresh_experts_pp),
         pooling_type     (cparams.pooling_type),
         rope_type        (hparams.rope_type),
         clear_lctx_inputs(clear_lctx_inputs),
@@ -535,6 +552,9 @@ ggml_tensor * llm_build_context::llm_build_inp_embd(
         ggml_set_input(lctx.inp_tokens);
 
         inpL = ggml_get_rows(ctx, tok_embd, lctx.inp_tokens);
+        if (tok_embd && tok_embd->type == GGML_TYPE_Q4_0_HADAMARD) {
+            inpL = ggml_hadamard(ctx, inpL, 64);
+        }
     } else {
        lctx.inp_embd = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, batch.n_tokens);
         inpL = lctx.inp_embd;
@@ -617,8 +637,19 @@ ggml_tensor * llm_build_context::llm_build_lora_mm(
         struct llama_context & lctx,
          struct ggml_context * ctx0,
           struct ggml_tensor * w,
-          struct ggml_tensor * cur) {
-    struct ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
+          struct ggml_tensor * cur,
+          bool cur_is_rotated) {
+    if (w) {
+        bool w_had = (w->type == GGML_TYPE_Q4_0_HADAMARD);
+        bool apply_had = (w_had != cur_is_rotated);
+        printf("DEBUG_LORA_MM: %-45s | w_had=%d | cur_is_rotated=%d | apply_had=%d\n",
+               w->name, w_had, cur_is_rotated, apply_had);
+    }
+    struct ggml_tensor * w_input = cur;
+    if (w && ((w->type == GGML_TYPE_Q4_0_HADAMARD) != cur_is_rotated)) {
+        w_input = ggml_hadamard(ctx0, cur, 64);
+    }
+    struct ggml_tensor * res = ggml_mul_mat(ctx0, w, w_input);
     for (auto & it : lctx.lora_adapters) {
         struct llama_lora_weight * lora = it.first->get_weight(w);
         if (lora == nullptr) {
@@ -642,8 +673,19 @@ ggml_tensor * llm_build_context::llm_build_lora_mm_id(
          struct ggml_context * ctx0,
           struct ggml_tensor * w,   // struct ggml_tensor * as
           struct ggml_tensor * cur, // struct ggml_tensor * b
-          struct ggml_tensor * ids) {
-    struct ggml_tensor * res = ggml_mul_mat_id(ctx0, w, cur, ids);
+          struct ggml_tensor * ids,
+          bool cur_is_rotated) {
+    if (w) {
+        bool w_had = (w->type == GGML_TYPE_Q4_0_HADAMARD);
+        bool apply_had = (w_had != cur_is_rotated);
+        printf("DEBUG_LORA_MM_ID: %-42s | w_had=%d | cur_is_rotated=%d | apply_had=%d\n",
+               w->name, w_had, cur_is_rotated, apply_had);
+    }
+    struct ggml_tensor * w_input = cur;
+    if (w && ((w->type == GGML_TYPE_Q4_0_HADAMARD) != cur_is_rotated)) {
+        w_input = ggml_hadamard(ctx0, cur, 64);
+    }
+    struct ggml_tensor * res = ggml_mul_mat_id(ctx0, w, w_input, ids);
     for (auto & it : lctx.lora_adapters) {
         struct llama_lora_weight * lora = it.first->get_weight(w);
         if (lora == nullptr) {
@@ -758,8 +800,8 @@ ggml_tensor * llm_build_context::llm_build_ffn(
          ggml_tensor * act_scales,
             llm_ffn_op_type   type_op,
           llm_ffn_gate_type   type_gate,
-         const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
-         bool is_norm, ggml_tensor * add_extra, ggml_tensor * post_norm) {
+          const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
+          bool is_norm, ggml_tensor * add_extra, ggml_tensor * post_norm, int quarot_bs) {
 
     if (!up_b && !up_s && !gate_b && !gate_s && !down_b && !down_s &&
         up->extra && gate->extra && down->extra && type_gate == LLM_FFN_PAR &&
@@ -784,6 +826,9 @@ ggml_tensor * llm_build_context::llm_build_ffn(
             cur = do_split_norm(ctx, cur, ffn_norm, lctx.model.hparams, cb, id, il_cb, is_norm);
             if (input->op != GGML_OP_REDUCE) {
                 cur->op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t) - 1] = 0xff;
+            }
+            if (quarot_bs > 0) {
+                cur = ggml_hadamard(ctx, cur, quarot_bs);
             }
             cur = ggml_fused_up_gate(ctx, split_u, split_g, cur, unary_op);
             cb(cur, "ffn_up_gate", il_cb);
@@ -846,6 +891,9 @@ ggml_tensor * llm_build_context::llm_build_ffn(
         auto unary_op = type_op == LLM_FFN_SILU ? GGML_UNARY_OP_SILU :
                         type_op == LLM_FFN_RELU ? GGML_UNARY_OP_RELU :
                         type_op == LLM_FFN_GELU ? GGML_UNARY_OP_GELU : GGML_UNARY_OP_SWIGLU_OAI;
+        if (quarot_bs > 0) {
+            cur = ggml_hadamard(ctx, cur, quarot_bs);
+        }
         cur = ggml_fused_up_gate(ctx, up, gate, cur, unary_op);
         cb(cur, "ffn_up_gate", il);
         if (lctx.model.arch == LLM_ARCH_STEP35) {
@@ -1043,10 +1091,11 @@ ggml_tensor * llm_build_context::llm_build_moe_ffn(
                        bool   norm_w,
                        bool   scale_w,
                       float   w_scale,
-llm_expert_gating_func_type   gating_op,
-         const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
-         ggml_tensor * up_gate_exps, ggml_tensor * up_gate_exps_b,
-         ggml_tensor * input_logits, ggml_tensor * down_exps_s) {
+ llm_expert_gating_func_type   gating_op,
+          const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
+          ggml_tensor * up_gate_exps, ggml_tensor * up_gate_exps_b,
+          ggml_tensor * input_logits, ggml_tensor * down_exps_s,
+                       bool   has_prompt_tokens) {
 
     GGML_ASSERT(gate_inp || input_logits);
 
@@ -1105,9 +1154,18 @@ llm_expert_gating_func_type   gating_op,
         auto& hparams = lctx.model.hparams;
         selected_experts = ggml_grouped_topk(ctx, selection_probs, hparams.n_expert_groups, hparams.n_group_used, 2, n_expert_used);
     } else {
-        //selected_experts = ggml_top_k_thresh(ctx, selection_probs, n_expert_used,
-        //        lctx.cparams.min_experts, lctx.cparams.thresh_experts); // [n_expert_used, n_tokens]
-        selected_experts = ggml_top_k(ctx, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+        int expert_min = lctx.cparams.min_experts;
+        float expert_thresh = lctx.cparams.thresh_experts;
+        if (has_prompt_tokens && lctx.cparams.min_experts_pp >= 0) {
+            expert_min = lctx.cparams.min_experts_pp;
+            expert_thresh = lctx.cparams.thresh_experts_pp;
+        }
+        if (expert_min >= 0 && expert_min < n_expert_used && expert_thresh > 0.0f) {
+            selected_experts = ggml_top_k_thresh(ctx, selection_probs, n_expert_used,
+                    expert_min, expert_thresh); // [n_expert_used, n_tokens]
+        } else {
+            selected_experts = ggml_top_k(ctx, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+        }
     }
     cb(selected_experts, "ffn_moe_topk", il);
     ggml_tensor * weights = ggml_get_rows(ctx,
@@ -1309,10 +1367,11 @@ ggml_tensor * llm_build_context::llm_build_std_moe_ffn(ggml_context * ctx, llama
                       float   w_scale,
 llm_expert_gating_func_type   gating_op,
             llm_ffn_op_type   type_op_shexp,
-         const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
-         ggml_tensor * up_gate_exps, ggml_tensor * up_gate_exps_b,
-         ggml_tensor * shexp_gate,
-         ggml_tensor * add_extra) {
+          const llm_build_cb & cb, int il, ggml_cgraph * graph, bool add_input,
+          ggml_tensor * up_gate_exps, ggml_tensor * up_gate_exps_b,
+          ggml_tensor * shexp_gate,
+          ggml_tensor * add_extra,
+                       bool   has_prompt_tokens) {
 
     auto split_up_exps    = up_exps ? (ggml_split_tensor_t *)up_exps->extra : nullptr;
     auto split_gate_exps  = gate_exps ? (ggml_split_tensor_t *)gate_exps->extra : nullptr;
@@ -1347,7 +1406,7 @@ llm_expert_gating_func_type   gating_op,
                     the_exp_probs_b,
                     n_expert, n_expert_used,
                     type_op, norm_w, scale_w, w_scale,
-                    gating_op, cb, il, graph, false, up_gate_exps, up_gate_exps_b);
+                    gating_op, cb, il, graph, false, up_gate_exps, up_gate_exps_b, nullptr, nullptr, has_prompt_tokens);
         cb(routed_out, "routed_out", il);
         if (add_input) {
             routed_out = ggml_add(ctx, routed_out, input);
@@ -1389,7 +1448,7 @@ llm_expert_gating_func_type   gating_op,
                             split_up_shexp->splits[id],   split_up_b_shexp   ? split_up_b_shexp->splits[id]   : nullptr, nullptr,
                             split_gate_shexp->splits[id], split_gate_b_shexp ? split_gate_b_shexp->splits[id] : nullptr, nullptr,
                             split_down_shexp->splits[id], !down_bias_added && split_down_b_shexp ? split_down_b_shexp->splits[id] : nullptr, nullptr,
-                            nullptr, type_op_shexp, LLM_FFN_PAR, cb, il, graph, false, false, nullptr);
+                            nullptr, type_op_shexp, LLM_FFN_PAR, cb, il, graph, false, false, nullptr, nullptr, (split_down_shexp && split_down_shexp->splits[id]->type == GGML_TYPE_Q4_0_HADAMARD) ? 64 : 0);
                     cb(shared_out, "ffn_shexp_out", il_cb);
                     if (shexp_gate) {
                         auto split_shexp_gate = (ggml_split_tensor_t *)shexp_gate->extra;
@@ -1428,7 +1487,8 @@ llm_expert_gating_func_type   gating_op,
                         up_shexp,   up_b_shexp,   nullptr,
                         gate_shexp, gate_b_shexp, nullptr,
                         down_shexp, down_b_shexp, nullptr,
-                        nullptr, type_op_shexp, LLM_FFN_PAR, cb, il, graph);
+                        nullptr, type_op_shexp, LLM_FFN_PAR, cb, il, graph, false, false, nullptr, nullptr,
+                    (down_shexp && down_shexp->type == GGML_TYPE_Q4_0_HADAMARD) ? 64 : 0);
                 cb(shared_out, "ffn_shexp_out", il);
                 if (shexp_gate) {
                     auto shared_gate = llm_build_lora_mm(lctx, ctx, shexp_gate, cur);
@@ -1507,7 +1567,8 @@ llm_expert_gating_func_type   gating_op,
                     type_op, norm_w, scale_w, w_scale,
                     gating_op, cb, il, graph, false,
                     split_up_gate_exps ? split_up_gate_exps->splits[id] : nullptr,
-                    split_exps_up_gate_b ? split_exps_up_gate_b->splits[id] : nullptr);
+                    split_exps_up_gate_b ? split_exps_up_gate_b->splits[id] : nullptr,
+                    nullptr, nullptr, has_prompt_tokens);
         cb(routed_out, "routed_out", il_cb);
 
         if (split_up_shexp) {
@@ -1518,7 +1579,7 @@ llm_expert_gating_func_type   gating_op,
                     split_up_shexp->splits[id],   split_up_b_shexp   ? split_up_b_shexp->splits[id]   : nullptr, nullptr,
                     split_gate_shexp->splits[id], split_gate_b_shexp ? split_gate_b_shexp->splits[id] : nullptr, nullptr,
                     split_down_shexp->splits[id], !down_bias_added && split_down_b_shexp ? split_down_b_shexp->splits[id] : nullptr, nullptr,
-                    nullptr, type_op_shexp, LLM_FFN_PAR, cb, il);
+                    nullptr, type_op_shexp, LLM_FFN_PAR, cb, il, graph, false, false, nullptr, nullptr, (split_down_shexp && split_down_shexp->splits[id]->type == GGML_TYPE_Q4_0_HADAMARD) ? 64 : 0);
             cb(shared_out, "ffn_shexp_out", il_cb);
             if (shexp_gate) {
                 auto split_shexp_gate = (ggml_split_tensor_t *)shexp_gate->extra;
@@ -1678,14 +1739,6 @@ static ggml_tensor * llm_build_kqv(
         if (should_use_f32_precision) {
             ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
         }
-        //ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
-
-        if (cparams.v_cache_hadamard) {
-            if (int block_size = lctx.model.hadamard_size_v(il); block_size > 0) {
-                cur = ggml_hadamard(ctx, cur, block_size);
-                cb(cur, "fa_h", il);
-            }
-        }
         cur = ggml_reshape_2d(ctx, cur, n_embd_head_v*n_head, n_tokens);
     } else {
 
@@ -1808,13 +1861,23 @@ static ggml_tensor * llm_build_kqv(
         }
     }
 
+    bool rotated = cparams.v_cache_hadamard;
+
     ggml_build_forward_expand(graph, cur);
 
     if (wo) {
-        cur = llm_build_context::llm_build_lora_mm(lctx, ctx, wo, cur);
+        cur = llm_build_context::llm_build_lora_mm(lctx, ctx, wo, cur, rotated);
+        rotated = false;
         if (lctx.model.arch == LLM_ARCH_GLM4 || lctx.model.arch == LLM_ARCH_GLM4_MOE) {
             // GLM4 and GLM4_MOE seem to have numerical issues with half-precision accumulators
             ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
+        }
+    }
+    if (rotated) {
+        if (int block_size = lctx.model.hadamard_size_v(il); block_size > 0) {
+            cur = ggml_hadamard(ctx, cur, block_size);
+            cb(cur, "attn_unhadamard", il);
+            rotated = false;
         }
     }
 
@@ -1905,15 +1968,15 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
             ggml_tensor * wq, ggml_tensor * bq,
             ggml_tensor * wk, ggml_tensor * bk,
             ggml_tensor * wv, ggml_tensor * bv,
-            float attention_scale, int il, bool add_graph_split) const {
-    auto Qcur = llm_build_lora_mm(lctx, ctx0, wq, cur);
+            float attention_scale, int il, bool add_graph_split, bool cur_is_rotated) const {
+    auto Qcur = llm_build_lora_mm(lctx, ctx0, wq, cur, cur_is_rotated);
     cb(Qcur, "Qcur", il);
     if (add_graph_split) {
         Qcur->op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t) - 1] = 0xff;
     }
-    auto Kcur = llm_build_lora_mm(lctx, ctx0, wk, cur);
+    auto Kcur = llm_build_lora_mm(lctx, ctx0, wk, cur, cur_is_rotated);
     cb(Kcur, "Kcur", il);
-    auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, cur);
+    auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, cur, cur_is_rotated);
     cb(Vcur, "Vcur", il);
     ggml_build_forward_expand(gf, Qcur);
     ggml_build_forward_expand(gf, Kcur);
@@ -1942,12 +2005,12 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
 }
 
 std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_build_mul_mat_qkv_gated(ggml_cgraph * gf, ggml_tensor * cur,
-            ggml_tensor * wq, ggml_tensor * wk, ggml_tensor * wv, ggml_tensor * q_norm, ggml_tensor * k_norm, int il) const {
-    auto Qaux = llm_build_lora_mm(lctx, ctx0, wq, cur);
+            ggml_tensor * wq, ggml_tensor * wk, ggml_tensor * wv, ggml_tensor * q_norm, ggml_tensor * k_norm, int il, bool cur_is_rotated) const {
+    auto Qaux = llm_build_lora_mm(lctx, ctx0, wq, cur, cur_is_rotated);
     cb(Qaux, "Qaux", il);
-    auto Kcur = llm_build_lora_mm(lctx, ctx0, wk, cur);
+    auto Kcur = llm_build_lora_mm(lctx, ctx0, wk, cur, cur_is_rotated);
     cb(Kcur, "Kcur", il);
-    auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, cur);
+    auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, cur, cur_is_rotated);
     cb(Vcur, "Vcur", il);
     ggml_build_forward_expand(gf, Qaux);
     ggml_build_forward_expand(gf, Kcur);
@@ -1981,13 +2044,13 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
             ggml_tensor * wq, ggml_tensor * bq,
             ggml_tensor * wk, ggml_tensor * bk,
             ggml_tensor * wv, ggml_tensor * bv,
-            ggml_tensor * q_norm, ggml_tensor * k_norm, float attention_scale, int il, bool add_graph_split) const {
+            ggml_tensor * q_norm, ggml_tensor * k_norm, float attention_scale, int il, bool add_graph_split, bool cur_is_rotated) const {
     int n_head    = hparams.n_head(il);
     int n_head_kv = hparams.n_head_kv(il);
     const int64_t n_embd_head_k = hparams.n_embd_head_k(il);
     const int64_t n_embd_gqa  = hparams.n_embd_v_gqa(il);
     if (wqkv) {
-        auto qkv = llm_build_lora_mm(lctx, ctx0, wqkv, cur);
+        auto qkv = llm_build_lora_mm(lctx, ctx0, wqkv, cur, cur_is_rotated);
         if (add_graph_split) {
             qkv->op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t) - 1] = 0xff;
         }
@@ -2021,7 +2084,7 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
     }
 
     if (wqk) {
-        auto qk = llm_build_lora_mm(lctx, ctx0, wqk, cur);
+        auto qk = llm_build_lora_mm(lctx, ctx0, wqk, cur, cur_is_rotated);
         if (add_graph_split) {
             qk->op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t) - 1] = 0xff;
         }
@@ -2030,7 +2093,7 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
             qk = ggml_add(ctx0, qk, bqk);
             cb(qk, "qkv_b", il);
         }
-        auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, cur);
+        auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, cur, cur_is_rotated);
         cb(Vcur, "Vcur", il);
         if (bv) {
             Vcur = ggml_add(ctx0, Vcur, bv);
@@ -2057,7 +2120,7 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
 
     }
 
-    auto [Q, K, V] = llm_build_mul_mat_qkv(gf, cur, wq, bq, wk, bk, wv, bv, attention_scale, il, add_graph_split);
+    auto [Q, K, V] = llm_build_mul_mat_qkv(gf, cur, wq, bq, wk, bk, wv, bv, attention_scale, il, add_graph_split, cur_is_rotated);
     auto Qcur = ggml_reshape_3d(ctx0, Q, n_embd_head_k, Q->ne[0]/n_embd_head_k, n_tokens);
     // Command-R/R+ uses LayerNorm (not RMSNorm) for per-head Q/K normalisation
     const auto qk_norm_type = (model.arch == LLM_ARCH_COMMAND_R) ? LLM_NORM : LLM_NORM_RMS;
@@ -2715,22 +2778,28 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                 if (!split_wq) continue;
                 auto cur = get_input_tensor_sm_graph(ctx0, input, id);
                 cur = do_split_norm(ctx0, cur, the_attn_norm, lctx.model.hparams, cb, id, il_cb, is_norm);
-                auto input_normed = cur;
+                bool w_had = (split_wq && split_wq->type == GGML_TYPE_Q4_0_HADAMARD);
+                auto cur_proj = cur;
+                if (w_had) {
+                    cur_proj = ggml_hadamard(ctx0, cur, 64);
+                    cb(cur_proj, "cur_proj_hadamard", il_cb);
+                }
+                auto input_normed = cur_proj;
                 auto the_q_norm = model.layers[il].attn_q_norm ? model.layers[il].attn_q_norm->extra ?
                     ((ggml_split_tensor_t *)model.layers[il].attn_q_norm->extra)->splits[id] : model.layers[il].attn_q_norm : nullptr;
                 auto the_k_norm = model.layers[il].attn_k_norm ? model.layers[il].attn_k_norm->extra ?
                     ((ggml_split_tensor_t *)model.layers[il].attn_k_norm->extra)->splits[id] : model.layers[il].attn_k_norm : nullptr;
                 ggml_tensor *Qcur, *Kcur, *Vcur, *gate = nullptr;
                 if (model.arch == LLM_ARCH_QWEN3NEXT || model.arch == LLM_ARCH_QWEN35 || model.arch == LLM_ARCH_QWEN35MOE) {
-                    auto [Q, K, V, G] = llm_build_mul_mat_qkv_gated(gf, cur, split_wq, split_wk, split_wv,
-                            the_q_norm, the_k_norm, il);
+                    auto [Q, K, V, G] = llm_build_mul_mat_qkv_gated(gf, cur_proj, split_wq, split_wk, split_wv,
+                            the_q_norm, the_k_norm, il, w_had);
                     Qcur = Q; Kcur = K; Vcur = V; gate = G;
                 } else {
-                    auto [Q, K, V] = llm_build_mul_mat_qkv(gf, cur, nullptr, nullptr, nullptr, nullptr,
+                    auto [Q, K, V] = llm_build_mul_mat_qkv(gf, cur_proj, nullptr, nullptr, nullptr, nullptr,
                             split_wq, bq ? bq->splits[id] : nullptr,
                             split_wk, bk ? bk->splits[id] : nullptr,
                             split_wv, bv ? bv->splits[id] : nullptr,
-                            the_q_norm, the_k_norm, f_attn_scale, il, add_graph_split);
+                            the_q_norm, the_k_norm, f_attn_scale, il, add_graph_split, w_had);
                     Qcur = Q; Kcur = K; Vcur = V;
                     if (model.arch == LLM_ARCH_MIMO2 && std::abs(model.hparams.f_attn_v_scale - 1) > 1e-4f) {
                         Vcur = ggml_scale(ctx0, Vcur, model.hparams.f_attn_v_scale);
@@ -2857,17 +2926,12 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                     ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
                 }
 
-                if (cparams.v_cache_hadamard) {
-                    if (int block_size = lctx.model.hadamard_size_v(il); block_size > 0) {
-                        cur = ggml_hadamard(ctx0, cur, block_size);
-                        cb(cur, "flash_attn_h", il_cb);
-                    }
-                }
+                bool rotated = cparams.v_cache_hadamard;
 
                 if (model.layers[il].wqkv_gate) {
                     auto wqkv_gate = (ggml_split_tensor_t *)model.layers[il].wqkv_gate->extra;
                     GGML_ASSERT(wqkv_gate && wqkv_gate->splits[id]);
-                    auto gate = llm_build_lora_mm(lctx, ctx0, wqkv_gate->splits[id], input_normed);
+                    auto gate = llm_build_lora_mm(lctx, ctx0, wqkv_gate->splits[id], input_normed, w_had);
                     if (model.arch == LLM_ARCH_LAGUNA) {
                         gate = ggml_softplus(ctx0, gate);
                     }
@@ -2909,11 +2973,20 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                     cur = ggml_get_rows(ctx0, cur, inp_out_ids);
                     cb(cur, "fa_get_rows", il_cb);
                 }
-
-                cur = llm_build_lora_mm(lctx, ctx0, split_wo, cur);
-                if (lctx.model.arch == LLM_ARCH_GLM4 || lctx.model.arch == LLM_ARCH_GLM4_MOE) {
-                    // GLM4 and GLM4_MOE seem to have numerical issues with half-precision accumulators
-                    ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
+                if (split_wo) {
+                    cur = llm_build_lora_mm(lctx, ctx0, split_wo, cur, rotated);
+                    rotated = false;
+                    if (lctx.model.arch == LLM_ARCH_GLM4 || lctx.model.arch == LLM_ARCH_GLM4_MOE) {
+                        // GLM4 and GLM4_MOE seem to have numerical issues with half-precision accumulators
+                        ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
+                    }
+                }
+                if (rotated) {
+                    if (int block_size = lctx.model.hadamard_size_v(il); block_size > 0) {
+                        cur = ggml_hadamard(ctx0, cur, block_size);
+                        cb(cur, "flash_attn_h", il_cb);
+                        rotated = false;
+                    }
                 }
                 cb(cur, "kqv_wo", il_cb);
                 if (!output_bias_added && bo) {
@@ -2952,17 +3025,26 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
     }
     auto input_normed = cur;
 
+    bool w_had = (model.layers[il].wq && model.layers[il].wq->type == GGML_TYPE_Q4_0_HADAMARD) ||
+                 (model.layers[il].wqkv && model.layers[il].wqkv->type == GGML_TYPE_Q4_0_HADAMARD) ||
+                 (model.layers[il].wqk && model.layers[il].wqk->type == GGML_TYPE_Q4_0_HADAMARD);
+    auto cur_proj = cur;
+    if (w_had) {
+        cur_proj = ggml_hadamard(ctx0, cur, 64);
+        cb(cur_proj, "cur_proj_hadamard", il);
+    }
+
     ggml_tensor *Qcur, *Kcur, *Vcur, *gate = nullptr;
     if (model.arch == LLM_ARCH_QWEN3NEXT || model.arch == LLM_ARCH_QWEN35 || model.arch == LLM_ARCH_QWEN35MOE) {
-        auto [Q, K, V, G] = llm_build_mul_mat_qkv_gated(gf, cur, model.layers[il].wq, model.layers[il].wk, model.layers[il].wv,
-                model.layers[il].attn_q_norm, model.layers[il].attn_k_norm, il);
+        auto [Q, K, V, G] = llm_build_mul_mat_qkv_gated(gf, cur_proj, model.layers[il].wq, model.layers[il].wk, model.layers[il].wv,
+                model.layers[il].attn_q_norm, model.layers[il].attn_k_norm, il, w_had);
         Qcur = Q; Kcur = K; Vcur = V; gate = G;
     } else {
-        auto [Q, K, V] = llm_build_mul_mat_qkv(gf, cur,
+        auto [Q, K, V] = llm_build_mul_mat_qkv(gf, cur_proj,
                 model.layers[il].wqkv, model.layers[il].bqkv,
                 model.layers[il].wqk,  model.layers[il].bqk,
                 model.layers[il].wq,   model.layers[il].bq, model.layers[il].wk, model.layers[il].bk, model.layers[il].wv, model.layers[il].bv,
-                model.layers[il].attn_q_norm, model.layers[il].attn_k_norm, f_attn_scale, il);
+                model.layers[il].attn_q_norm, model.layers[il].attn_k_norm, f_attn_scale, il, false, w_had);
         Qcur = Q; Kcur = K; Vcur = V;
         if (model.arch == LLM_ARCH_MIMO2 && std::abs(model.hparams.f_attn_v_scale - 1) > 1e-4f) {
             Vcur = ggml_scale(ctx0, Vcur, model.hparams.f_attn_v_scale);
@@ -3004,7 +3086,7 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                 nullptr, nullptr,
                 Kcur, Vcur, Qcur, KQ_mask, n_tokens, kv_head, n_kv, KQ_scale, cb, il, sinks, n_swa);
         cb(cur, "wqkv", il);
-        auto gate = llm_build_lora_mm(lctx, ctx0, wqkv_gate, input_normed);
+        auto gate = llm_build_lora_mm(lctx, ctx0, wqkv_gate, input_normed, w_had);
         if (model.arch == LLM_ARCH_LAGUNA) {
             gate = ggml_softplus(ctx0, gate);
         }

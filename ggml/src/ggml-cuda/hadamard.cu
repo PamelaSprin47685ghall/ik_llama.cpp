@@ -203,6 +203,7 @@ void ggml_cuda_op_hadamard(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         case GGML_TYPE_F16:    DISPATCH_HADAMARD_F16_NH;                                   break;
         case GGML_TYPE_Q8_0:   DISPATCH_HADAMARD_QUANT_NH(dequantize_q8_0,   QK8_0,  false); break;
         case GGML_TYPE_Q4_0:   DISPATCH_HADAMARD_QUANT_NH(dequantize_q4_0,   QK4_0,  true);  break;
+        case GGML_TYPE_Q4_0_HADAMARD: DISPATCH_HADAMARD_QUANT_NH(dequantize_q4_0, QK4_0,  true);  break;
         case GGML_TYPE_Q4_1:   DISPATCH_HADAMARD_QUANT_NH(dequantize_q4_1,   QK4_1,  true);  break;
         case GGML_TYPE_Q5_0:   DISPATCH_HADAMARD_QUANT_NH(dequantize_q5_0,   QK5_0,  true);  break;
         case GGML_TYPE_Q5_1:   DISPATCH_HADAMARD_QUANT_NH(dequantize_q5_1,   QK5_1,  true);  break;

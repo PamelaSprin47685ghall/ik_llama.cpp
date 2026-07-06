@@ -2887,7 +2887,7 @@ static void llm_apply_khad_pretransform(llama_model & model) {
     // Below-cliff and unmeasured types fall back to the runtime cache_nope path.
     auto castable = [](ggml_type t) {
         return t == GGML_TYPE_F32 || t == GGML_TYPE_F16 || t == GGML_TYPE_BF16 ||
-               t == GGML_TYPE_Q4_0 || t == GGML_TYPE_Q4_1 ||
+               t == GGML_TYPE_Q4_0 || t == GGML_TYPE_Q4_0_HADAMARD || t == GGML_TYPE_Q4_1 ||
                t == GGML_TYPE_Q5_0 || t == GGML_TYPE_Q5_1 ||
                t == GGML_TYPE_Q6_0 || t == GGML_TYPE_Q8_0 ||
                t == GGML_TYPE_IQ4_NL ||
@@ -6542,7 +6542,9 @@ struct llama_context_params llama_context_default_params() {
         /*.rope_cache                  =*/ false,
         /*.graph_reuse                 =*/ true,
         /*.min_experts                 =*/ -1,
-        /*.thtesh_experts              =*/ 0.0f,
+        /*.thresh_experts              =*/ 0.0f,
+        /*.min_experts_pp              =*/ -1,
+        /*.thresh_experts_pp           =*/ 0.0f,
         /*.only_active_experts         =*/ false,
         /*.k_cache_hadamard            =*/ false,
         /*.v_cache_hadamard            =*/ false,
@@ -6976,6 +6978,8 @@ struct llama_context * llama_init_from_model(
     cparams.scheduler_async  = params.scheduler_async;
     cparams.min_experts      = params.min_experts;
     cparams.thresh_experts   = params.thresh_experts;
+    cparams.min_experts_pp   = params.min_experts_pp;
+    cparams.thresh_experts_pp= params.thresh_experts_pp;
     cparams.cuda_params      = params.cuda_params;
     cparams.mtp              = params.mtp;
     cparams.worst_graph_tokens = params.worst_case_tokens;
@@ -7109,6 +7113,7 @@ struct llama_context * llama_init_from_model(
     LLAMA_LOG_INFO("%s: reduce_type   = %s\n",     __func__, ggml_type_name(cparams.reduce_type));
     LLAMA_LOG_INFO("%s: sched_async   = %d\n",     __func__, cparams.scheduler_async);
     LLAMA_LOG_INFO("%s: ser           = %d, %g\n", __func__, cparams.min_experts, cparams.thresh_experts);
+    LLAMA_LOG_INFO("%s: ser_pp        = %d, %g\n", __func__, cparams.min_experts_pp, cparams.thresh_experts_pp);
     LLAMA_LOG_INFO("%s: freq_base     = %.1f\n",   __func__, cparams.rope_freq_base);
     LLAMA_LOG_INFO("%s: freq_scale    = %g\n",     __func__, cparams.rope_freq_scale);
     if (cparams.cuda_params) {

@@ -196,7 +196,7 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             nb1, nb2, nb3,
             stream
         );
-    } else if (dst->type == GGML_TYPE_Q4_0) {
+    } else if (dst->type == GGML_TYPE_Q4_0 || dst->type == GGML_TYPE_Q4_0_HADAMARD) {
         set_rows_cuda_quant<idx_t, block_q4_0, QK4_0, quantize_f32_q4_0_block>(
             src0_d, src1_d, (block_q4_0*)dst->data,
             ne00, ne01, ne02, ne03,
