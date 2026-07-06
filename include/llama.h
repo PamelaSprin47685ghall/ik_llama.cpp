@@ -543,7 +543,6 @@ extern "C" {
         void * custom_quants;                // pointer to vector containing custom quantization rules
         void * repack_pattern;               // pointer to a vector containing regexes to be used for matching tensor names. Can be null
         struct quantize_user_data * user_data; // so we can pass extra data to the quantization functions
-        bool quarot_hadamard;                  // apply QuaRot Hadamard absorb to attention/delta_net/shared_expert weights
     } llama_model_quantize_params;
 
     // grammar types

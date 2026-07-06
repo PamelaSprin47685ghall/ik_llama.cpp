@@ -1022,22 +1022,6 @@ static void quarot_apply(float * f32_data, const ggml_tensor * tensor, int block
     }
 }
 
-// QuaRot: check if tensor name ends with a target suffix
-static bool is_quarot_target(const std::string & name) {
-    static constexpr const char * suffixes[] = {
-        "attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight",
-        "attn_qkv.weight", "attn_gate.weight",
-        "ssm_alpha.weight", "ssm_beta.weight", "ssm_out.weight",
-        "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight",
-    };
-    for (auto s : suffixes) {
-        int slen = strlen(s);
-        int nlen = name.size();
-        if (nlen >= slen && name.compare(nlen - slen, slen, s) == 0) return true;
-    }
-    return false;
-}
-
 static void llama_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, const llama_model_quantize_params * params) {
     ggml_type default_type;
     llama_ftype ftype = params->ftype;
@@ -1732,7 +1716,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                     llama_tensor_dequantize_internal(tensor, f32_conv_buf, workers, nelements, nthread);
                     f32_data = (float *) f32_conv_buf.data();
                 }
-                if (new_type == GGML_TYPE_Q4_0_HADAMARD && is_quarot_target(name)) {
+                if (new_type == GGML_TYPE_Q4_0_HADAMARD) {
                     constexpr int block_size = 64;
                     if (tensor->ne[0] % block_size != 0) {
                         fprintf(stderr, "\nWARNING: skipping Hadamard for %s: ne[0]=%lld not divisible by %d\n",

@@ -407,9 +407,6 @@ ggml_tensor * delta_net::build_gated_output(llama_context & lctx, ggml_context *
     ggml_tensor * final_output = ggml_reshape_2d(ctx0, attn_out_norm, head_v_dim*num_v_heads, n_tok);
     cb(final_output, "final_output", il);
 
-    if (ssm_out && ssm_out->type == GGML_TYPE_Q4_0_HADAMARD) {
-        final_output = ggml_hadamard(ctx0, final_output, 64);
-    }
     ggml_tensor * out = llm_build_context::llm_build_lora_mm(lctx, ctx0, ssm_out, final_output);
     cb(out, "linear_attn_out", il);
 
@@ -481,10 +478,6 @@ ggml_tensor * delta_net::build_layer_attn_linear_core(ggml_context * ctx0, ggml_
             auto split_norm = (ggml_split_tensor_t *)l.attn_norm->extra;
             GGML_ASSERT(split_norm && split_norm->splits[id]);
             auto cur = llm_build_context::llm_build_norm(ctx0, input, hparams, split_norm->splits[id], nullptr, LLM_NORM_RMS, cb, il);
-            auto wqkv = split_wqkv ? split_wqkv->splits[id] : (split_smm_in ? split_smm_in->splits[id] : nullptr);
-            if (wqkv && wqkv->type == GGML_TYPE_Q4_0_HADAMARD) {
-                cur = ggml_hadamard(ctx0, cur, 64);
-            }
             int qnext_state_slots = split_s_l->splits[id]->ne[1];
             int il_cb = 1000*il + id;
             int64_t num_k_heads_id, num_v_heads_id;
@@ -579,11 +572,6 @@ ggml_tensor * delta_net::build_layer_attn_linear_core(ggml_context * ctx0, ggml_
     }
     auto norm = model.layers[il].attn_norm->extra ? ((ggml_split_tensor_t *)model.layers[il].attn_norm->extra)->splits[idx] : model.layers[il].attn_norm;
     auto cur = llm_build_context::llm_build_norm(ctx0, input, hparams, norm, nullptr, LLM_NORM_RMS, cb, il);
-    auto wqkv = model.layers[il].wqkv ? model.layers[il].wqkv : model.layers[il].ssm_in;
-    if (wqkv && wqkv->type == GGML_TYPE_Q4_0_HADAMARD) {
-        cur = ggml_hadamard(ctx0, cur, 64);
-    }
-
     auto [qkv_mixed, z] = build_qkvz(lctx, ctx0, model.layers[il].wqkv, model.layers[il].wqkv_gate, model.layers[il].ssm_in,
             head_k_dim, num_k_heads, head_v_dim, num_v_heads, cur, il, cb, gf);
 

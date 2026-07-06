@@ -535,14 +535,12 @@ struct llama_model {
         return 0;
     }
 
-    inline int hadamard_size_k(int il) const {
-        if (is_mla_model()) return 64;
-        return hadamard_size(hparams.n_embd_head_k(il));
+    inline int hadamard_size_k(int /*il*/) const {
+        return 64;
     }
 
-    inline int hadamard_size_v(int il) const {
-        if (is_mla_model()) return 64;
-        return hadamard_size(hparams.n_embd_head_v(il));
+    inline int hadamard_size_v(int /*il*/) const {
+        return 64;
     }
 
     size_t cache_size(int il, ggml_type type_k, ggml_type type_v, uint32_t kv_size, int mla_attn, int n_seq_max, bool flash_attn) const;

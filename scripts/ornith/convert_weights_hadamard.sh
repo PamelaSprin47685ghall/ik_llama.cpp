@@ -32,9 +32,13 @@ echo "  输出: ${OUT}"
 echo "  线程数: 32"
 echo "=========================================="
 
-T="iq2_k_r4"
-CQ="blk\\..*\\.ffn_gate_exps=${T},blk\\..*\\.ffn_up_exps=${T},blk\\..*\\.ffn_down_exps=${T}"
+T_EXP="iq2_k_r4"
+CQ="blk\\..*\\.ffn_gate_exps=${T_EXP},blk\\..*\\.ffn_up_exps=${T_EXP},blk\\..*\\.ffn_down_exps=${T_EXP}"
 
 exec "${QUANT_BIN}" --allow-requantize \
-  --output-tensor-type q6_k --token-embedding-type q8_0 --custom-q "$CQ" \
+  --output-tensor-type q4_0_hadamard \
+  --token-embedding-type q8_0 \
+  --attn-k-type q4_0_hadamard \
+  --attn-v-type q4_0_hadamard \
+  --custom-q "$CQ" \
   "$INP" "$OUT" Q4_0_HADAMARD 32

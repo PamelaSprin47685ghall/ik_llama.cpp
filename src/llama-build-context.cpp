@@ -552,6 +552,9 @@ ggml_tensor * llm_build_context::llm_build_inp_embd(
         ggml_set_input(lctx.inp_tokens);
 
         inpL = ggml_get_rows(ctx, tok_embd, lctx.inp_tokens);
+        if (tok_embd && tok_embd->type == GGML_TYPE_Q4_0_HADAMARD) {
+            inpL = ggml_hadamard(ctx, inpL, 64);
+        }
     } else {
        lctx.inp_embd = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, batch.n_tokens);
         inpL = lctx.inp_embd;
@@ -634,8 +637,14 @@ ggml_tensor * llm_build_context::llm_build_lora_mm(
         struct llama_context & lctx,
          struct ggml_context * ctx0,
           struct ggml_tensor * w,
-          struct ggml_tensor * cur) {
-    struct ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
+          struct ggml_tensor * cur,
+          bool cur_is_rotated) {
+    struct ggml_tensor * w_input = cur;
+    bool w_had = (w && w->type == GGML_TYPE_Q4_0_HADAMARD);
+    if (w_had != cur_is_rotated) {
+        w_input = ggml_hadamard(ctx0, cur, 64);
+    }
+    struct ggml_tensor * res = ggml_mul_mat(ctx0, w, w_input);
     for (auto & it : lctx.lora_adapters) {
         struct llama_lora_weight * lora = it.first->get_weight(w);
         if (lora == nullptr) {
@@ -659,8 +668,14 @@ ggml_tensor * llm_build_context::llm_build_lora_mm_id(
          struct ggml_context * ctx0,
           struct ggml_tensor * w,   // struct ggml_tensor * as
           struct ggml_tensor * cur, // struct ggml_tensor * b
-          struct ggml_tensor * ids) {
-    struct ggml_tensor * res = ggml_mul_mat_id(ctx0, w, cur, ids);
+          struct ggml_tensor * ids,
+          bool cur_is_rotated) {
+    struct ggml_tensor * w_input = cur;
+    bool w_had = (w && w->type == GGML_TYPE_Q4_0_HADAMARD);
+    if (w_had != cur_is_rotated) {
+        w_input = ggml_hadamard(ctx0, cur, 64);
+    }
+    struct ggml_tensor * res = ggml_mul_mat_id(ctx0, w, w_input, ids);
     for (auto & it : lctx.lora_adapters) {
         struct llama_lora_weight * lora = it.first->get_weight(w);
         if (lora == nullptr) {
@@ -802,6 +817,9 @@ ggml_tensor * llm_build_context::llm_build_ffn(
             if (input->op != GGML_OP_REDUCE) {
                 cur->op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t) - 1] = 0xff;
             }
+            if (split_u && split_u->type == GGML_TYPE_Q4_0_HADAMARD) {
+                cur = ggml_hadamard(ctx, cur, 64);
+            }
             cur = ggml_fused_up_gate(ctx, split_u, split_g, cur, unary_op);
             cb(cur, "ffn_up_gate", il_cb);
             if (lctx.model.arch == LLM_ARCH_STEP35) {
@@ -872,9 +890,6 @@ ggml_tensor * llm_build_context::llm_build_ffn(
             *(float *)(cur->op_params + 1) = lctx.model.hparams.swiglu_limits_shared[il];
         }
         if (down) {
-            if (quarot_bs > 0) {
-                cur = ggml_hadamard(ctx, cur, quarot_bs);
-            }
             cur = llm_build_lora_mm(lctx, ctx, down, cur);
             cb(cur, "ffn_down", il);
             if (lctx.model.arch == LLM_ARCH_GLM4 || lctx.model.arch == LLM_ARCH_GLM4_MOE) {
@@ -903,10 +918,6 @@ ggml_tensor * llm_build_context::llm_build_ffn(
             cb(cur, "ffn_out_with_inp", il);
         }
         return cur;
-    }
-
-    if (quarot_bs > 0) {
-        cur = ggml_hadamard(ctx, cur, quarot_bs);
     }
 
     struct ggml_tensor * tmp = up ? llm_build_lora_mm(lctx, ctx, up, cur) : cur;
@@ -1018,9 +1029,6 @@ ggml_tensor * llm_build_context::llm_build_ffn(
     }
 
     if (down) {
-        if (quarot_bs > 0) {
-            cur = ggml_hadamard(ctx, cur, quarot_bs);
-        }
         cur = llm_build_lora_mm(lctx, ctx, down, cur);
         if (lctx.model.arch == LLM_ARCH_GLM4 || lctx.model.arch == LLM_ARCH_GLM4_MOE) {
             // GLM4 and GLM4_MOE seem to have numerical issues with half-precision accumulators
@@ -1631,6 +1639,8 @@ static ggml_tensor * llm_build_kqv(
     const llama_model   & model   = lctx.model;
     const llama_hparams & hparams = lctx.model.hparams;
     const llama_cparams & cparams = lctx.cparams;
+    int block_size = lctx.model.hadamard_size_v(il);
+    bool skip_vhad = cparams.v_cache_hadamard && (wo && wo->type == GGML_TYPE_Q4_0_HADAMARD) && (block_size == 64);
 
     const int64_t n_ctx         = kv.size;
     const int64_t n_head        = hparams.n_head(il);
@@ -1723,9 +1733,8 @@ static ggml_tensor * llm_build_kqv(
         }
         //ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
 
-        bool skip_vhad = cparams.v_cache_hadamard && (lctx.model.layers[il].wo && lctx.model.layers[il].wo->type == GGML_TYPE_Q4_0_HADAMARD);
         if (cparams.v_cache_hadamard && !skip_vhad) {
-            if (int block_size = lctx.model.hadamard_size_v(il); block_size > 0) {
+            if (block_size > 0) {
                 cur = ggml_hadamard(ctx, cur, block_size);
                 cb(cur, "fa_h", il);
             }
@@ -1855,7 +1864,7 @@ static ggml_tensor * llm_build_kqv(
     ggml_build_forward_expand(graph, cur);
 
     if (wo) {
-        cur = llm_build_context::llm_build_lora_mm(lctx, ctx, wo, cur);
+        cur = llm_build_context::llm_build_lora_mm(lctx, ctx, wo, cur, skip_vhad);
         if (lctx.model.arch == LLM_ARCH_GLM4 || lctx.model.arch == LLM_ARCH_GLM4_MOE) {
             // GLM4 and GLM4_MOE seem to have numerical issues with half-precision accumulators
             ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
@@ -1950,19 +1959,14 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
             ggml_tensor * wk, ggml_tensor * bk,
             ggml_tensor * wv, ggml_tensor * bv,
             float attention_scale, int il, bool add_graph_split) const {
-    bool is_quarot = (wq && wq->type == GGML_TYPE_Q4_0_HADAMARD);
-    ggml_tensor * h_cur = is_quarot ? ggml_hadamard(ctx0, cur, 64) : cur;
-    ggml_tensor * q_cur = h_cur;
-    ggml_tensor * k_cur = h_cur;
-    ggml_tensor * v_cur = h_cur;
-    auto Qcur = llm_build_lora_mm(lctx, ctx0, wq, q_cur);
+    auto Qcur = llm_build_lora_mm(lctx, ctx0, wq, cur);
     cb(Qcur, "Qcur", il);
     if (add_graph_split) {
         Qcur->op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t) - 1] = 0xff;
     }
-    auto Kcur = llm_build_lora_mm(lctx, ctx0, wk, k_cur);
+    auto Kcur = llm_build_lora_mm(lctx, ctx0, wk, cur);
     cb(Kcur, "Kcur", il);
-    auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, v_cur);
+    auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, cur);
     cb(Vcur, "Vcur", il);
     ggml_build_forward_expand(gf, Qcur);
     ggml_build_forward_expand(gf, Kcur);
@@ -1992,16 +1996,11 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
 
 std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_build_mul_mat_qkv_gated(ggml_cgraph * gf, ggml_tensor * cur,
             ggml_tensor * wq, ggml_tensor * wk, ggml_tensor * wv, ggml_tensor * q_norm, ggml_tensor * k_norm, int il) const {
-    bool is_quarot = (wq && wq->type == GGML_TYPE_Q4_0_HADAMARD);
-    ggml_tensor * h_cur = is_quarot ? ggml_hadamard(ctx0, cur, 64) : cur;
-    ggml_tensor * q_cur = h_cur;
-    ggml_tensor * k_cur = h_cur;
-    ggml_tensor * v_cur = h_cur;
-    auto Qaux = llm_build_lora_mm(lctx, ctx0, wq, q_cur);
+    auto Qaux = llm_build_lora_mm(lctx, ctx0, wq, cur);
     cb(Qaux, "Qaux", il);
-    auto Kcur = llm_build_lora_mm(lctx, ctx0, wk, k_cur);
+    auto Kcur = llm_build_lora_mm(lctx, ctx0, wk, cur);
     cb(Kcur, "Kcur", il);
-    auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, v_cur);
+    auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, cur);
     cb(Vcur, "Vcur", il);
     ggml_build_forward_expand(gf, Qaux);
     ggml_build_forward_expand(gf, Kcur);
@@ -2041,8 +2040,7 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
     const int64_t n_embd_head_k = hparams.n_embd_head_k(il);
     const int64_t n_embd_gqa  = hparams.n_embd_v_gqa(il);
     if (wqkv) {
-        ggml_tensor * qkv_cur = wqkv->type == GGML_TYPE_Q4_0_HADAMARD ? ggml_hadamard(ctx0, cur, 64) : cur;
-        auto qkv = llm_build_lora_mm(lctx, ctx0, wqkv, qkv_cur);
+        auto qkv = llm_build_lora_mm(lctx, ctx0, wqkv, cur);
         if (add_graph_split) {
             qkv->op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t) - 1] = 0xff;
         }
@@ -2076,9 +2074,7 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
     }
 
     if (wqk) {
-        bool is_quarot = (wqk->type == GGML_TYPE_Q4_0_HADAMARD);
-        ggml_tensor * qk_cur = is_quarot ? ggml_hadamard(ctx0, cur, 64) : cur;
-        auto qk = llm_build_lora_mm(lctx, ctx0, wqk, qk_cur);
+        auto qk = llm_build_lora_mm(lctx, ctx0, wqk, cur);
         if (add_graph_split) {
             qk->op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t) - 1] = 0xff;
         }
@@ -2087,8 +2083,7 @@ std::tuple<ggml_tensor*, ggml_tensor*, ggml_tensor*> llm_build_context::llm_buil
             qk = ggml_add(ctx0, qk, bqk);
             cb(qk, "qkv_b", il);
         }
-        ggml_tensor * v_cur = is_quarot ? ggml_hadamard(ctx0, cur, 64) : cur;
-        auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, v_cur);
+        auto Vcur = llm_build_lora_mm(lctx, ctx0, wv, cur);
         cb(Vcur, "Vcur", il);
         if (bv) {
             Vcur = ggml_add(ctx0, Vcur, bv);
@@ -2918,9 +2913,10 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                     ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
                 }
 
-                bool skip_vhad = cparams.v_cache_hadamard && (split_wo && split_wo->type == GGML_TYPE_Q4_0_HADAMARD);
+                int block_size = lctx.model.hadamard_size_v(il);
+                bool skip_vhad = cparams.v_cache_hadamard && (split_wo && split_wo->type == GGML_TYPE_Q4_0_HADAMARD) && (block_size == 64);
                 if (cparams.v_cache_hadamard && !skip_vhad) {
-                    if (int block_size = lctx.model.hadamard_size_v(il); block_size > 0) {
+                    if (block_size > 0) {
                         cur = ggml_hadamard(ctx0, cur, block_size);
                         cb(cur, "flash_attn_h", il_cb);
                     }
@@ -2971,10 +2967,7 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                     cur = ggml_get_rows(ctx0, cur, inp_out_ids);
                     cb(cur, "fa_get_rows", il_cb);
                 }
-                if (split_wo && split_wo->type == GGML_TYPE_Q4_0_HADAMARD && !skip_vhad) {
-                    cur = ggml_hadamard(ctx0, cur, 64);
-                }
-                cur = llm_build_lora_mm(lctx, ctx0, split_wo, cur);
+                cur = llm_build_lora_mm(lctx, ctx0, split_wo, cur, skip_vhad);
                 if (lctx.model.arch == LLM_ARCH_GLM4 || lctx.model.arch == LLM_ARCH_GLM4_MOE) {
                     // GLM4 and GLM4_MOE seem to have numerical issues with half-precision accumulators
                     ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
@@ -3092,10 +3085,6 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
         cb(cur, "attn_gated_3d", il);
         cur = ggml_reshape_2d(ctx0, cur, n_embd_head_v * n_head_l, n_tokens);
         cb(cur, "attn_gated", il);
-        bool skip_vhad = cparams.v_cache_hadamard;
-        if (model.layers[il].wo && model.layers[il].wo->type == GGML_TYPE_Q4_0_HADAMARD && !skip_vhad) {
-            cur = ggml_hadamard(ctx0, cur, 64);
-        }
         cur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wo, cur);
         if (model.layers[il].bo) {
             cur = ggml_add(ctx0, cur, model.layers[il].bo);
@@ -3113,33 +3102,15 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                 cur = ggml_mul(ctx0, cur, gate);
             }
             cb(cur, "qkv_gated", il);
-            bool skip_vhad = cparams.v_cache_hadamard;
-            if (model.layers[il].wo && model.layers[il].wo->type == GGML_TYPE_Q4_0_HADAMARD && !skip_vhad) {
-                cur = ggml_hadamard(ctx0, cur, 64);
-            }
             cur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wo, cur);
             if (model.layers[il].bo) {
                 cur = ggml_add(ctx0, cur, model.layers[il].bo);
             }
             cb(cur, "attn_out", il);
         } else {
-            if (model.layers[il].wo && model.layers[il].wo->type == GGML_TYPE_Q4_0_HADAMARD) {
-                cur = llm_build_kv(ctx0, lctx, kv_self, gf,
-                        nullptr, nullptr,
-                        Kcur, Vcur, Qcur, KQ_mask, n_tokens, kv_head, n_kv, KQ_scale, cb, il, sinks, n_swa);
-                bool skip_vhad = cparams.v_cache_hadamard;
-                if (!skip_vhad) {
-                    cur = ggml_hadamard(ctx0, cur, 64);
-                }
-                cur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wo, cur);
-                if (model.layers[il].bo) {
-                    cur = ggml_add(ctx0, cur, model.layers[il].bo);
-                }
-            } else {
-                cur = llm_build_kv(ctx0, lctx, kv_self, gf,
-                        model.layers[il].wo, model.layers[il].bo,
-                        Kcur, Vcur, Qcur, KQ_mask, n_tokens, kv_head, n_kv, KQ_scale, cb, il, sinks, n_swa);
-            }
+            cur = llm_build_kv(ctx0, lctx, kv_self, gf,
+                    model.layers[il].wo, model.layers[il].bo,
+                    Kcur, Vcur, Qcur, KQ_mask, n_tokens, kv_head, n_kv, KQ_scale, cb, il, sinks, n_swa);
         }
     }
 

@@ -75,6 +75,7 @@ echo "[3/3] 开始自包含测速..."
 
 python3 - "${PORT}" "${MAX_TOKENS}" << 'EOF'
 import urllib.request
+import urllib.error
 import json
 import sys
 import time
@@ -96,9 +97,10 @@ def main():
     
     # Construct payload
     payload = {
-        "prompt": prd,
+        "prompt": prd + "\n\n请用中文简要总结以上PRD的主要内容，用一句话概括：",
         "n_predict": max_tokens,
-        "temperature": 0.2
+        "temperature": 0.2,
+        "stream": True
     }
     
     data = json.dumps(payload).encode("utf-8")
@@ -110,17 +112,43 @@ def main():
     
     print(f"发送请求到 {url} (max_tokens={max_tokens})...")
     t0 = time.time()
+    content = ""
+    res = {}
     try:
         with urllib.request.urlopen(req, timeout=600) as response:
-            res_data = response.read().decode("utf-8")
-            res = json.loads(res_data)
+            while True:
+                line = response.readline()
+                if not line:
+                    break
+                line_str = line.decode("utf-8", errors="replace").strip()
+                if line_str.startswith("data: "):
+                    data_str = line_str[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        c = chunk.get("content", "")
+                        content += c
+                        print(c, end="", flush=True)
+                        if "timings" in chunk:
+                            res = chunk
+                    except Exception:
+                        pass
+            print()
+    except urllib.error.HTTPError as e:
+        print(f"HTTP Error during request: {e.code} {e.reason}")
+        try:
+            print(e.read().decode("utf-8"))
+        except Exception:
+            pass
+        sys.exit(1)
     except Exception as e:
         print(f"Error during request: {e}")
         sys.exit(1)
     t1 = time.time()
     
     # Get timings
-    timings = res.get("timings", {})
+    timings = res.get("timings", {}) if res else {}
     prompt_n = timings.get("prompt_n", 0)
     prompt_ms = timings.get("prompt_ms", 0.0)
     predicted_n = timings.get("predicted_n", 0)
@@ -130,7 +158,6 @@ def main():
     decode_tps = (predicted_n / (predicted_ms / 1000.0)) if predicted_ms > 0 else 0
     
     # Print a small sample of content to show it works
-    content = res.get("content", "")
     sample = content[:150].replace("\n", " ")
     print(f"[SAMPLE OUTPUT] {sample}...")
     
