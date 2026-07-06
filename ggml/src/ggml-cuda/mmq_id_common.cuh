@@ -52,6 +52,7 @@ static_assert(sizeof(block_q8_1_mmq) == 4*sizeof(block_q8_1),      "Unexpected b
 static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
     switch (type_x) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_0_HADAMARD:
         case GGML_TYPE_Q4_1:
             return MMQ_Q8_1_DS_LAYOUT_DS4;
         case GGML_TYPE_Q5_0:
@@ -375,6 +376,7 @@ static constexpr __device__ int get_mmq_y_device() {
 static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml_type type, int mmq_y) {
     switch (type) {
         case GGML_TYPE_Q4_0:    return MMQ_DP4A_TXS_Q4_0;
+        case GGML_TYPE_Q4_0_HADAMARD: return MMQ_DP4A_TXS_Q4_0;
         case GGML_TYPE_Q4_1:    return MMQ_DP4A_TXS_Q4_1;
         case GGML_TYPE_Q5_0:    return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_Q5_1:    return MMQ_DP4A_TXS_Q8_1;
@@ -435,6 +437,7 @@ static_assert(MMQ_MMA_TILE_X_K_Q6_K % 8 == 4, "Wrong padding.");
 static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
     switch (type) {
         case GGML_TYPE_Q4_0:    return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_Q4_0_HADAMARD: return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_Q4_1:    return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_Q5_0:    return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_Q5_1:    return MMQ_MMA_TILE_X_K_Q8_1;
@@ -3300,6 +3303,14 @@ struct mmq_type_traits_id<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_0> {
 };
 
 template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits_id<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_0_HADAMARD> {
+    //static constexpr int              vdr          = VDR_Q4_0_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q4_0<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_DS4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q4_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+
+template <int mmq_x, int mmq_y, bool need_check>
 struct mmq_type_traits_id<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_1> {
     //static constexpr int              vdr          = VDR_Q4_1_Q8_1_MMQ;
     static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q4_1<mmq_y, need_check>;
@@ -4142,6 +4153,7 @@ void mul_mat_q_case_id(ggml_backend_cuda_context & ctx, const mmq_args_id & args
     template void mul_mat_q_case_id<type>(ggml_backend_cuda_context & ctx, const mmq_args_id & args, cudaStream_t stream) \
 
 extern DECL_MMQ_CASE(GGML_TYPE_Q4_0);
+extern DECL_MMQ_CASE(GGML_TYPE_Q4_0_HADAMARD);
 extern DECL_MMQ_CASE(GGML_TYPE_Q4_1);
 extern DECL_MMQ_CASE(GGML_TYPE_Q5_0);
 extern DECL_MMQ_CASE(GGML_TYPE_Q5_1);

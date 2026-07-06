@@ -24,6 +24,7 @@ struct quant_option {
 
 static const std::vector<struct quant_option> QUANT_OPTIONS = {
     { "Q4_0",     LLAMA_FTYPE_MOSTLY_Q4_0,     " 3.56G, +0.2166 ppl @ LLaMA-v1-7B", },
+    { "Q4_0_HADAMARD", LLAMA_FTYPE_MOSTLY_Q4_0_HADAMARD, " 3.56G, Q4_0 with Hadamard rotation", },
     { "Q4_1",     LLAMA_FTYPE_MOSTLY_Q4_1,     " 3.90G, +0.1585 ppl @ LLaMA-v1-7B", },
     { "Q5_0",     LLAMA_FTYPE_MOSTLY_Q5_0,     " 4.33G, +0.0683 ppl @ LLaMA-v1-7B", },
     { "Q5_1",     LLAMA_FTYPE_MOSTLY_Q5_1,     " 4.70G, +0.0349 ppl @ LLaMA-v1-7B", },
@@ -151,7 +152,7 @@ static bool try_parse_ftype(const std::string & ftype_str_in, llama_ftype & ftyp
 //
 [[noreturn]]
 static void usage(const char * executable) {
-    printf("usage: %s [--help] [--allow-requantize] [--leave-output-tensor] [--pure] [--imatrix] [--hide-imatrix] [--ignore-imatrix-rules] [--dry-run] [--include-weights] [--exclude-weights] [--output-tensor-type] [--token-embedding-type] [--extra-output-tensor] [--ffn-gate-inp-type] [--attn-q-type] [--attn-k-type] [--attn-v-type] [--attn-qkv-type] [--attn-output-type] [--ffn-gate-type] [--ffn-down-type] [--ffn-up-type] [--repack] [--repack-pattern] [--keep-split] [--partial-requant] [--override-kv] model-f32.gguf [model-quant.gguf] type [nthreads]\n\n", executable);
+    printf("usage: %s [--help] [--allow-requantize] [--leave-output-tensor] [--pure] [--imatrix] [--hide-imatrix] [--ignore-imatrix-rules] [--dry-run] [--include-weights] [--exclude-weights] [--output-tensor-type] [--token-embedding-type] [--extra-output-tensor] [--ffn-gate-inp-type] [--attn-q-type] [--attn-k-type] [--attn-v-type] [--attn-qkv-type] [--attn-output-type] [--ffn-gate-type] [--ffn-down-type] [--ffn-up-type] [--repack] [--repack-pattern] [--keep-split] [--partial-requant] [--quarot-hadamard] [--override-kv] model-f32.gguf [model-quant.gguf] type [nthreads]\n\n", executable);
     printf("  --allow-requantize: Allows requantizing tensors that have already been quantized. Warning: This can severely reduce quality compared to quantizing from 16bit or 32bit\n");
     printf("  --leave-output-tensor: Will leave output.weight un(re)quantized. Increases model size but may also increase quality, especially when requantizing\n");
     printf("  --pure: Disable k-quant mixtures and quantize all tensors to the same type\n");
@@ -170,6 +171,7 @@ static void usage(const char * executable) {
     printf("  --repack-pattern Comma separated list of regexs to use for matching tensor names to be repacked.\n\n");
     printf("  --symmetric-q40  Use [-7:7] range for Q4_0 quantization (turns off imatrix)\n\n");
     printf("  --slow-iq2ks Use the original very slow IQ2_KS quantization method.\n\n");
+    printf("  --quarot-hadamard: Apply QuaRot Hadamard absorb (W <- W @ H) to attention/delta_net/shared_expert weight tensors before quantization\n\n");
     printf("Additional specific tensor quantization types used in the custom quant scheme 'CQS (default is Q2_K):\n");
     printf("      --attn-q-type ggml_type: use this ggml_type for the attn_q.weight tensor.\n");
     printf("      --attn-k-type ggml_type: use this ggml_type for the attn_k.weight tensor.\n");
@@ -462,6 +464,8 @@ int main(int argc, char ** argv) {
             params.allow_requantize = true;
         } else if (strcmp(argv[arg_idx], "--pure") == 0) {
             params.pure = true;
+        } else if (strcmp(argv[arg_idx], "--quarot-hadamard") == 0) {
+            params.quarot_hadamard = true;
         } else if (strcmp(argv[arg_idx], "--imatrix") == 0) {
             if (arg_idx < argc-1) {
                 imatrix_file = argv[++arg_idx];

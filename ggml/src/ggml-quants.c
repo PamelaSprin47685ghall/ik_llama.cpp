@@ -15410,6 +15410,7 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
                 }
             } break;
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_0_HADAMARD:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q4_0, data, nb);
             } break;

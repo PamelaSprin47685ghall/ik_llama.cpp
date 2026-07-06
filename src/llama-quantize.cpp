@@ -992,12 +992,59 @@ static void do_quantize(int nthread, const ggml_tensor * tensor, ggml_type new_t
     }
 }
 
+// QuaRot: in-place Walsh-Hadamard transform on n floats (n must be power of 2)
+static void quarot_hadamard_block(float * block, int n) {
+    constexpr float ksqrt2 = 0.70710678118654752f;
+    float scale = 1.0f;
+    for (int h = 1; h < n; h <<= 1) {
+        for (int i = 0; i < n; i += 2 * h) {
+            for (int j = i; j < i + h; ++j) {
+                const float a = block[j], b = block[j + h];
+                block[j]       = a + b;
+                block[j + h]   = a - b;
+            }
+        }
+        scale *= ksqrt2;
+    }
+    for (int i = 0; i < n; ++i) block[i] *= scale;
+}
+
+// QuaRot: apply W <- W @ H along ne[0] (input dim), block-diagonal Hadamard
+static void quarot_apply(float * f32_data, const ggml_tensor * tensor, int block_size) {
+    const int ne0   = tensor->ne[0];
+    const int nrows = tensor->ne[1] * tensor->ne[2] * tensor->ne[3];
+    const int nblk  = ne0 / block_size;
+    for (int r = 0; r < nrows; ++r) {
+        float * row = f32_data + (int64_t)r * ne0;
+        for (int b = 0; b < nblk; ++b) {
+            quarot_hadamard_block(row + b * block_size, block_size);
+        }
+    }
+}
+
+// QuaRot: check if tensor name ends with a target suffix
+static bool is_quarot_target(const std::string & name) {
+    static constexpr const char * suffixes[] = {
+        "attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight",
+        "attn_qkv.weight", "attn_gate.weight",
+        "ssm_alpha.weight", "ssm_beta.weight", "ssm_out.weight",
+        "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight",
+    };
+    for (auto s : suffixes) {
+        int slen = strlen(s);
+        int nlen = name.size();
+        if (nlen >= slen && name.compare(nlen - slen, slen, s) == 0) return true;
+    }
+    return false;
+}
+
 static void llama_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, const llama_model_quantize_params * params) {
     ggml_type default_type;
     llama_ftype ftype = params->ftype;
 
     switch (ftype) {
         case LLAMA_FTYPE_MOSTLY_Q4_0: default_type = GGML_TYPE_Q4_0; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_HADAMARD: default_type = GGML_TYPE_Q4_0_HADAMARD; break;
         case LLAMA_FTYPE_MOSTLY_Q4_1: default_type = GGML_TYPE_Q4_1; break;
         case LLAMA_FTYPE_MOSTLY_Q5_0: default_type = GGML_TYPE_Q5_0; break;
         case LLAMA_FTYPE_MOSTLY_Q5_1: default_type = GGML_TYPE_Q5_1; break;
@@ -1684,6 +1731,20 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 } else {
                     llama_tensor_dequantize_internal(tensor, f32_conv_buf, workers, nelements, nthread);
                     f32_data = (float *) f32_conv_buf.data();
+                }
+                if (new_type == GGML_TYPE_Q4_0_HADAMARD && is_quarot_target(name)) {
+                    constexpr int block_size = 64;
+                    if (tensor->ne[0] % block_size != 0) {
+                        fprintf(stderr, "\nWARNING: skipping Hadamard for %s: ne[0]=%lld not divisible by %d\n",
+                                name.c_str(), (long long)tensor->ne[0], block_size);
+                    } else {
+                        if (tensor->type == GGML_TYPE_F32) {
+                            f32_conv_buf.resize(nelements);
+                            memcpy(f32_conv_buf.data(), f32_data, (size_t)nelements * sizeof(float));
+                            f32_data = (float *) f32_conv_buf.data();
+                        }
+                        quarot_apply(f32_data, tensor, block_size);
+                    }
                 }
 
                 auto expected_size = ggml_row_size(new_type, tensor->ne[0])*tensor->ne[1]*tensor->ne[2]*tensor->ne[3];

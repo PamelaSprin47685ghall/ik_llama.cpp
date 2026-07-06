@@ -193,6 +193,7 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q4_0_8_8      = 35, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_MXFP4         = 38, // except 1d tensors, 38 to be compatible with mainline
         LLAMA_FTYPE_MOSTLY_Q1_0_G128     = 41, // except 1d tensors, 38 to be compatible with mainline
+        LLAMA_FTYPE_MOSTLY_Q4_0_HADAMARD = 400, // Q4_0 with Hadamard rotation
         //
         LLAMA_FTYPE_MOSTLY_Q6_0          = 135, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ1_BN        = 136, // except 1d tensors
@@ -542,6 +543,7 @@ extern "C" {
         void * custom_quants;                // pointer to vector containing custom quantization rules
         void * repack_pattern;               // pointer to a vector containing regexes to be used for matching tensor names. Can be null
         struct quantize_user_data * user_data; // so we can pass extra data to the quantization functions
+        bool quarot_hadamard;                  // apply QuaRot Hadamard absorb to attention/delta_net/shared_expert weights
     } llama_model_quantize_params;
 
     // grammar types

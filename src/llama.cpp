@@ -6592,6 +6592,7 @@ struct llama_model_quantize_params llama_model_quantize_default_params() {
         /*.custom_quants               =*/ nullptr,
         /*.repack_pattern              =*/ nullptr,
         /*.user_data                   =*/ nullptr,
+        /*.quarot_hadamard             =*/ false,
     };
 
     return result;

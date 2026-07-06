@@ -145,6 +145,9 @@ static void ggml_cuda_mul_mat_q_switch_type_id(ggml_backend_cuda_context & ctx, 
         case GGML_TYPE_Q4_0:
             mul_mat_q_case_id<GGML_TYPE_Q4_0>(ctx, args, stream);
             break;
+        case GGML_TYPE_Q4_0_HADAMARD:
+            mul_mat_q_case_id<GGML_TYPE_Q4_0_HADAMARD>(ctx, args, stream);
+            break;
         case GGML_TYPE_Q4_1:
             mul_mat_q_case_id<GGML_TYPE_Q4_1>(ctx, args, stream);
             break;
@@ -501,6 +504,7 @@ bool ggml_cuda_can_use_mmq_id(enum ggml_type type, int cc, int64_t ne11) {
 
     switch (type) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_0_HADAMARD:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q5_1:

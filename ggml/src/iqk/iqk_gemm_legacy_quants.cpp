@@ -2068,7 +2068,8 @@ template <typename Dequantizer> void set_functions(std::array<mul_mat_t, IQK_MAX
 
 bool iqk_convert_legacy_quants_q8_r8(int type, int n, const void * vx, size_t bx, void * vy, int nrc_x) {
     switch (type) {
-        case GGML_TYPE_Q4_0  : iqk_convert_qX_q80_r8<block_q4_0, Q4_0_Dequantizer>(n, vx, bx, vy, nrc_x); break;
+        case GGML_TYPE_Q4_0  :
+        case GGML_TYPE_Q4_0_HADAMARD: iqk_convert_qX_q80_r8<block_q4_0, Q4_0_Dequantizer>(n, vx, bx, vy, nrc_x); break;
         case GGML_TYPE_Q4_1  : iqk_convert_qX_1_q8_1_r8<block_q4_1, Q4_1_Dequantizer>(n, vx, bx, vy, nrc_x); break;
         case GGML_TYPE_Q5_0  : iqk_convert_qX_q80_r8<block_q5_0, Q5_0_Dequantizer>(n, vx, bx, vy, nrc_x); break;
         case GGML_TYPE_Q5_1  : iqk_convert_qX_1_q8_1_r8<block_q5_1, Q5_1_Dequantizer<block_q5_1>>(n, vx, bx, vy, nrc_x); break;
@@ -2091,6 +2092,7 @@ bool iqk_set_kernels_legacy_quants(int ne00, int typeA, int typeB, std::array<mu
 
     switch (typeA) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_0_HADAMARD:
             set_functions<Q4_0_1_Unpacker>(kernels);
             break;
         case GGML_TYPE_Q4_1:
@@ -3298,7 +3300,8 @@ void iqk_convert_qX_1_q8_1_r8(int n, const void * vx, size_t bx, void * vy, int 
 
 bool iqk_convert_legacy_quants_q8_r8(int type, int n, const void * vx, size_t bx, void * vy, int nrc_x) {
     switch (type) {
-        case GGML_TYPE_Q4_0  : iqk_convert_qX_q80_r8<block_q4_0, DeqQ40>(n, vx, bx, vy, nrc_x); break;
+        case GGML_TYPE_Q4_0  :
+        case GGML_TYPE_Q4_0_HADAMARD: iqk_convert_qX_q80_r8<block_q4_0, DeqQ40>(n, vx, bx, vy, nrc_x); break;
         case GGML_TYPE_Q4_1  : iqk_convert_qX_1_q8_1_r8<block_q4_1, DeqQ41>(n, vx, bx, vy, nrc_x); break;
         case GGML_TYPE_Q5_0  : iqk_convert_qX_q80_r8<block_q5_0, DeqQ50>(n, vx, bx, vy, nrc_x); break;
         case GGML_TYPE_Q5_1  : iqk_convert_qX_1_q8_1_r8<block_q5_1, DeqQ51>(n, vx, bx, vy, nrc_x); break;
@@ -3323,6 +3326,7 @@ bool iqk_set_kernels_legacy_quants(int ne00, int typeA, int typeB, std::array<mu
 
     switch (typeA) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_0_HADAMARD:
             IQK_SET_MUL_MAT_FUNCTIONS_T(mul_mat_qX_0_q8_0, DequantizerQ40, kernels);
             break;
         case GGML_TYPE_Q4_1:
@@ -3458,7 +3462,7 @@ inline std::pair<mul_mat_t, int> mul_mat_kernel(int int_typeA, int nq) {
         MAKE_FUNCS(mul_mat_qX_1_q8_2_T<Q6_0_1_Unpacker, nq);
 #endif
     }
-    else if (typeA == GGML_TYPE_Q4_0) {
+    else if (typeA == GGML_TYPE_Q4_0 || typeA == GGML_TYPE_Q4_0_HADAMARD) {
 #ifdef __aarch64__
         MAKE_FUNCS(mul_mat_qX_0_q8_0<DequantizerQ40, nq);
 #else
